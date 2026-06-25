@@ -53,7 +53,13 @@ public final class AppConstants {
     // 模型參數
     public static final String MODEL_FILE = "ssd_mobilenet_v1.tflite";
     public static final String YOLO_MODEL_FILE = "yolov8n.tflite";
+    public static final String CURRENCY_CLS_MODEL_FILE = "currency_cls.onnx";
     public static final int INPUT_SIZE = 640;
     public static final int NUM_CLASSES = 90;
     public static final int MAX_RESULTS = 5;
+
+    // 港幣圖像分類（YOLOv8n-cls）
+    public static final int CURRENCY_CLS_INPUT_SIZE = 224;
+    public static final float CURRENCY_CLS_CONFIDENCE_THRESHOLD = 0.65f;
+    public static final float CURRENCY_CLS_HIGH_CONFIDENCE_THRESHOLD = 0.85f;
 }

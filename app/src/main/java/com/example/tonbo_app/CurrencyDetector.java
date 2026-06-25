@@ -39,10 +39,12 @@ public class CurrencyDetector {
     
     private Context context;
     private OCRHelper ocrHelper;
+    private CurrencyClassifier currencyClassifier;
     
     public CurrencyDetector(Context context) {
         this.context = context;
         this.ocrHelper = new OCRHelper(context);
+        this.currencyClassifier = new CurrencyClassifier(context);
     }
     
     /**
@@ -61,33 +63,85 @@ public class CurrencyDetector {
         Map<String, CurrencyResult> uniqueResults = new LinkedHashMap<>();
 
         try {
-            // 使用OCR識別文字
-            List<OCRHelper.OCRResult> ocrResults = ocrHelper.recognizeText(bitmap, rotationDegrees);
-
-            // 分析OCR結果尋找貨幣信息
-            for (OCRHelper.OCRResult ocrResult : ocrResults) {
-                CurrencyResult currencyResult = analyzeTextForCurrency(ocrResult.getText());
-                if (currencyResult != null && currencyResult.getConfidence() >= 0.6f) {
-                    String key = currencyResult.getAmount() + "-" + currencyResult.getType();
-                    if (!uniqueResults.containsKey(key) || uniqueResults.get(key).getConfidence() < currencyResult.getConfidence()) {
-                        uniqueResults.put(key, currencyResult);
-                    }
-                }
+            // 1. 優先使用 YOLOv8-cls 圖像分類（真實視覺識別）
+            CurrencyResult visionResult = classifyCurrencyFromImage(bitmap, rotationDegrees);
+            if (visionResult != null) {
+                String key = visionResult.getAmount() + "-" + visionResult.getType();
+                uniqueResults.put(key, visionResult);
             }
 
-            // 移除不准确的图像分析，避免误识别
-            // if (uniqueResults.isEmpty()) {
-            //     for (CurrencyResult cr : analyzeImageForCurrency(bitmap)) {
-            //         String key = cr.getAmount() + "-" + cr.getType();
-            //         uniqueResults.putIfAbsent(key, cr);
-            //     }
-            // }
+            // 2. OCR 作為輔助（硬幣、文字清晰場景、或視覺模型不確定時）
+            List<OCRHelper.OCRResult> ocrResults = ocrHelper.recognizeText(bitmap, rotationDegrees);
+            for (OCRHelper.OCRResult ocrResult : ocrResults) {
+                CurrencyResult ocrCurrency = analyzeTextForCurrency(ocrResult.getText());
+                if (ocrCurrency == null || ocrCurrency.getConfidence() < 0.6f) {
+                    continue;
+                }
+
+                String key = ocrCurrency.getAmount() + "-" + ocrCurrency.getType();
+                CurrencyResult existing = uniqueResults.get(key);
+                if (existing == null) {
+                    // 視覺未識別到時，採用 OCR（尤其硬幣 1/2/5 元）
+                    boolean visionConfident = visionResult != null
+                            && visionResult.getConfidence() >= AppConstants.CURRENCY_CLS_CONFIDENCE_THRESHOLD;
+                    if (!visionConfident) {
+                        uniqueResults.put(key, ocrCurrency);
+                    }
+                } else if (existing.getAmount().equals(ocrCurrency.getAmount())) {
+                    // 視覺與 OCR 一致，提高置信度
+                    float boosted = Math.min(0.99f, Math.max(existing.getConfidence(), ocrCurrency.getConfidence()) + 0.1f);
+                    uniqueResults.put(key, new CurrencyResult(
+                            existing.getName(),
+                            existing.getAmount(),
+                            existing.getColor(),
+                            existing.getDesign(),
+                            existing.getType(),
+                            boosted,
+                            existing.getDetectionMethod() + " + OCR"
+                    ));
+                }
+            }
 
         } catch (Exception e) {
             Log.e(TAG, "貨幣檢測失敗: " + e.getMessage());
         }
 
         return new ArrayList<>(uniqueResults.values());
+    }
+
+    /**
+     * 使用訓練好的 YOLOv8n-cls 模型進行港幣紙幣圖像識別
+     */
+    private CurrencyResult classifyCurrencyFromImage(Bitmap bitmap, int rotationDegrees) {
+        if (currencyClassifier == null || !currencyClassifier.isReady()) {
+            Log.w(TAG, "圖像分類器未就緒，跳過視覺識別");
+            return null;
+        }
+
+        CurrencyClassifier.ClassificationResult result =
+                currencyClassifier.classify(bitmap, rotationDegrees);
+        if (result == null || !result.isConfident()) {
+            if (result != null) {
+                Log.d(TAG, String.format("視覺識別置信度不足: %s (%.0f%%)",
+                        result.getClassName(), result.getConfidence() * 100));
+            }
+            return null;
+        }
+
+        CurrencyInfo info = CURRENCY_FEATURES.get(result.getAmount());
+        if (info == null) {
+            return null;
+        }
+
+        return new CurrencyResult(
+                info.getName(),
+                result.getAmount(),
+                info.getColor(),
+                info.getDesign(),
+                info.getType(),
+                result.getConfidence(),
+                "圖像識別 (AI)"
+        );
     }
     
     /**
@@ -281,6 +335,10 @@ public class CurrencyDetector {
      * 關閉檢測器
      */
     public void close() {
+        if (currencyClassifier != null) {
+            currencyClassifier.close();
+            currencyClassifier = null;
+        }
         if (ocrHelper != null) {
             ocrHelper.close();
             ocrHelper = null;
